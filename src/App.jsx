@@ -35,6 +35,7 @@ function App() {
     const [localPlayers, setLocalPlayers] = useState([]); // [{uid, nombre}] for device mode
     const [currentTurnIndex, setCurrentTurnIndex] = useState(0); // For pass & play
     const [showRole, setShowRole] = useState(false);
+    const [revealRole, setRevealRole] = useState(false); // For Online Mode press-to-reveal
 
     // --- EFFECT: Auth Listener ---
     useEffect(() => {
