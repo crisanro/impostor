@@ -64,7 +64,7 @@ function App() {
         const codeParam = params.get('room');
         if (codeParam) {
             setJoinCodeInput(codeParam);
-            setViewMode('JOIN');
+            // setViewMode('JOIN'); // Don't change mode, just prefill Home input
         }
 
         // Restore Session
