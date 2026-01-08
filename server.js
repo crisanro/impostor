@@ -15,13 +15,41 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // API Endpoint for AI Word Generation
+// API Endpoint for AI Word Generation
 app.post('/api/generate-word', async (req, res) => {
     try {
-        const { apiKey, topic } = req.body;
+        const { hostUid, topic } = req.body;
 
-        if (!apiKey) {
-            return res.status(400).json({ error: "Falta API Key" });
+        if (!hostUid) {
+            return res.status(400).json({ error: "Falta Host UID" });
         }
+
+        // Importar Firestore Admin (agregar al inicio del archivo)
+        const { initializeApp: initializeAdminApp, cert } = await import('firebase-admin/app');
+        const { getFirestore: getAdminFirestore } = await import('firebase-admin/firestore');
+
+        // Inicializar Admin SDK si no está inicializado
+        let adminDb;
+        try {
+            const admin = await import('firebase-admin');
+            if (!admin.apps.length) {
+                // Usar credenciales por defecto en producción (Google Cloud)
+                admin.initializeApp();
+            }
+            adminDb = admin.firestore();
+        } catch (e) {
+            console.error("Error inicializando Admin SDK:", e);
+            return res.status(500).json({ error: "Error de configuración del servidor" });
+        }
+
+        // Obtener la API Key del usuario desde Firestore (server-side)
+        const userDoc = await adminDb.collection('users').doc(hostUid).get();
+
+        if (!userDoc.exists || !userDoc.data().apiKey) {
+            return res.status(400).json({ error: "Host sin API Key configurada" });
+        }
+
+        const apiKey = userDoc.data().apiKey;
 
         // Initialize Gemini with User's Key
         const genAI = new GoogleGenerativeAI(apiKey);
