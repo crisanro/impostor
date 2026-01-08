@@ -55,8 +55,11 @@ function App() {
 
     // Reset Turn Index on New Game (Word Change)
     useEffect(() => {
-        setCurrentTurnIndex(0);
-    }, [roomData?.gameData?.palabra]);
+        if (roomData?.estado === 'JUEGO') {
+            setCurrentTurnIndex(0);
+            setShowRole(false);
+        }
+    }, [roomData?.estado]);
 
     // --- EFFECT: URL Params & Session ---
     useEffect(() => {
@@ -65,7 +68,6 @@ function App() {
         const codeParam = params.get('room');
         if (codeParam) {
             setJoinCodeInput(codeParam);
-            // setViewMode('JOIN'); // Don't change mode, just prefill Home input
         }
 
         // Restore Session
@@ -120,7 +122,6 @@ function App() {
         setRoomCode('');
         setRoomData(null);
         setViewMode('HOME');
-        // Don't clear localUser if they just left a room? optional.
     };
 
     // --- ROOM LOGIC ---
@@ -132,10 +133,8 @@ function App() {
             const hostName = authUser.displayName || "Host";
             const code = Math.random().toString(36).substring(2, 6).toUpperCase();
 
-            // Ensure Host uses their Google Name if not already set locally
             let u = localUser;
             if (!u || (authUser && u.nombre !== authUser.displayName)) {
-                // Prefer Google Identity for Host consistency
                 u = { uid: authUser.uid, nombre: authUser.displayName };
                 setLocalUser(u);
             } else if (!u) {
@@ -144,13 +143,13 @@ function App() {
 
             await setDoc(doc(db, "salas", code), {
                 host: u.uid,
-                createdAt: serverTimestamp(), // Cleanup timestamp
+                createdAt: serverTimestamp(),
                 estado: "LOBBY",
-                mode: gameMode, // ONLINE or DEVICE
-                jugadores: [{ uid: u.uid, nombre: u.nombre, votos: 0, estado: 'vivo', voto: null }], // Online players
+                mode: gameMode,
+                jugadores: [{ uid: u.uid, nombre: u.nombre, votos: 0, estado: 'vivo', voto: null }],
                 localPlayers: gameMode === 'DEVICE' ? [{ uid: u.uid, nombre: u.nombre, estado: 'vivo' }] : [],
                 impostores: [],
-                config: { pistasActivas, impostorCount, customPrompt }, // NO KEY HERE
+                config: { pistasActivas, impostorCount, customPrompt: '' },
                 gameData: { palabra: "", categoria: "", pista: "" },
                 lastResult: null
             });
@@ -158,10 +157,10 @@ function App() {
             setRoomCode(code);
             saveSession(u, code);
             subscribeToRoom(code, u);
-            setViewMode('LOBBY'); // Force UI transition
+            setViewMode('LOBBY');
         } catch (error) {
             console.error("Error creando sala:", error);
-            alert("Error creando sala: " + error.message + "\n\nRevisa la consola (F12) para más detalles.");
+            alert("Error creando sala: " + error.message);
         }
     };
 
@@ -176,16 +175,8 @@ function App() {
 
             if (!docSnap.exists()) return alert("Sala no existe");
 
-            // If Device Mode, joining via phone IS NOT ALLOWED?
-            // "Multi-device" means everyone joins. "Device" means only Host controls.
-            // If room is DEVICE mode, maybe viewers can see status but not play?
-            // Let's assume standard Join is for Online mode. 
-            // If Device mode, maybe they just join as spectators? 
-            // For now, let's treat Join as "Becoming a player in array".
-
             const u = localUser || createLoginLocal(nombreInput);
 
-            // Only add to players if Online Mode
             if (docSnap.data().mode !== 'DEVICE') {
                 const currentPlayers = docSnap.data().jugadores || [];
                 const exists = currentPlayers.some(p => p.uid === u.uid);
@@ -224,32 +215,33 @@ function App() {
         await updateDoc(doc(db, "salas", roomCode), {
             localPlayers: arrayUnion(newP)
         });
-        setNombreInput(""); // reuse input
+        setNombreInput("");
     };
 
-    const generarPalabra = async (salaConfig, userKey) => {
+    const generarPalabra = async (salaConfig, hostUid) => {
         // Try AI first
-        if (userKey) {
+        if (hostUid) {
             try {
                 const res = await fetch('/api/generate-word', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        apiKey: userKey,
+                        hostUid: hostUid,
                         topic: salaConfig.customPrompt || "Cultura General"
                     })
                 });
+
                 if (res.ok) {
                     const data = await res.json();
                     return { palabra: data.word, pista: data.hint, categoria: "IA: " + (data.category || salaConfig.customPrompt) };
                 }
             } catch (e) {
                 console.error("AI Failed", e);
-                alert("Error conectando con la IA (backend no disponible o error de red). Usando palabras por defecto.");
+                // Fallback silently to default
             }
         }
 
-        // Fallback
+        // Fallback a palabras por defecto
         const cats = Object.keys(defaultWordBank);
         const cat = cats[Math.floor(Math.random() * cats.length)];
         const item = defaultWordBank[cat][Math.floor(Math.random() * defaultWordBank[cat].length)];
@@ -264,15 +256,12 @@ function App() {
             return alert(`Necesitas mínimo 3 jugadores para iniciar.\n(Faltan ${faltan})`);
         }
 
-        // Generate Word - Use LOCAL geminiKey state if Host
-        const gameData = await generarPalabra(roomData.config, geminiKey);
+        const gameData = await generarPalabra(roomData.config, authUser?.uid || localUser?.uid);
 
-        // Assign Roles
         const pIds = players.map(p => p.uid);
         const imps = [];
         let count = roomData.config.impostorCount || 1;
 
-        // Safety check
         if (count >= players.length) count = 1;
 
         while (imps.length < count) {
@@ -280,7 +269,6 @@ function App() {
             if (!imps.includes(r)) imps.push(r);
         }
 
-        // Select Starting Player
         const startingPlayer = players[Math.floor(Math.random() * players.length)].nombre;
 
         const updates = {
@@ -288,7 +276,6 @@ function App() {
             impostores: imps,
             gameData: { ...gameData, startingPlayer },
             lastResult: null,
-            // Reset states
             [roomData.mode === 'DEVICE' ? 'localPlayers' : 'jugadores']: players.map(p => ({ ...p, estado: 'vivo', votos: 0, voto: null }))
         };
 
@@ -361,12 +348,15 @@ function App() {
                 )}
 
                 <div style={{ marginTop: 20 }}>
-                    <label>Tema de Palabras (IA):</label>
-                    <input placeholder="Ej: Anime, Fútbol, Star Wars..." value={customPrompt} onChange={e => setCustomPrompt(e.target.value)} />
-                    <small style={{ color: '#aaa' }}>Si dejas vacío, usa "Cultura General". Requiere API Key guardada.</small>
+                    <label>Número de Impostores:</label>
+                    <input
+                        type="number"
+                        min="1"
+                        max="3"
+                        value={impostorCount}
+                        onChange={e => setImpostorCount(parseInt(e.target.value) || 1)}
+                    />
                 </div>
-
-
 
                 <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
                     <button onClick={crearSala} style={{ background: '#28a745', flex: 1 }}>CREAR</button>
@@ -380,15 +370,13 @@ function App() {
     if (!roomData) return <div className="card">Cargando...</div>;
 
     const players = roomData.mode === 'DEVICE' ? roomData.localPlayers : roomData.jugadores;
-    const isHost = roomData.host === (localUser?.uid || authUser?.uid); // Loose check logic
-    // Actually, persistence stores uid in localUser.
+    const isHost = roomData.host === (localUser?.uid || authUser?.uid);
 
     // Header
     const Header = () => (
         <div style={{ borderBottom: '1px solid #444', paddingBottom: 10, marginBottom: 10, display: 'flex', justifyContent: 'space-between' }}>
             <strong>{roomCode}</strong>
             <button onClick={() => {
-                // If host
                 if (roomData.host === localUser?.uid) deleteDoc(doc(db, "salas", roomCode));
                 clearSession();
             }} style={{ background: '#d32f2f', padding: '5px 10px', fontSize: '0.7em', width: 'auto' }}>Salir</button>
@@ -409,9 +397,40 @@ function App() {
                 {roomData.mode === 'DEVICE' ? (
                     <div style={{ marginTop: 20, borderTop: '1px solid #444', paddingTop: 10 }}>
                         <h3>Jugadores Locales</h3>
-                        <ul style={{ textAlign: 'left', background: '#222', padding: 10, marginBottom: 10 }}>
-                            {players.map(p => <li key={p.uid}>{p.nombre}</li>)}
-                        </ul>
+                        <div style={{ textAlign: 'left', background: '#222', padding: 10, marginBottom: 10 }}>
+                            {players.map(p => (
+                                <div key={p.uid} style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    padding: '8px 0',
+                                    borderBottom: '1px solid #333'
+                                }}>
+                                    <span>{p.nombre}</span>
+                                    {isHost && (
+                                        <button
+                                            onClick={async () => {
+                                                if (confirm(`¿Eliminar a ${p.nombre}?`)) {
+                                                    const roomRef = doc(db, "salas", roomCode);
+                                                    await updateDoc(roomRef, {
+                                                        localPlayers: arrayRemove(p)
+                                                    });
+                                                }
+                                            }}
+                                            style={{
+                                                background: '#d32f2f',
+                                                padding: '4px 10px',
+                                                fontSize: '0.7em',
+                                                width: 'auto',
+                                                marginTop: 0
+                                            }}
+                                        >
+                                            ❌
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
                         {isHost && (
                             <div style={{ display: 'flex', gap: 5 }}>
                                 <input placeholder="Nombre Jugador" value={nombreInput} onChange={e => setNombreInput(e.target.value)} />
@@ -422,23 +441,79 @@ function App() {
                 ) : (
                     <div style={{ marginTop: 20 }}>
                         <h3>Jugadores ({players.length})</h3>
-                        <ul style={{ textAlign: 'left', background: '#222', padding: 10 }}>
-                            {players.map(p => <li key={p.uid}>{p.nombre}</li>)}
-                        </ul>
+                        <div style={{ textAlign: 'left', background: '#222', padding: 10 }}>
+                            {players.map(p => (
+                                <div key={p.uid} style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    padding: '8px 0',
+                                    borderBottom: '1px solid #333'
+                                }}>
+                                    <span>{p.nombre}</span>
+                                    {isHost && p.uid !== localUser?.uid && (
+                                        <button
+                                            onClick={async () => {
+                                                if (confirm(`¿Eliminar a ${p.nombre}?`)) {
+                                                    const roomRef = doc(db, "salas", roomCode);
+                                                    await updateDoc(roomRef, {
+                                                        jugadores: arrayRemove(p)
+                                                    });
+                                                }
+                                            }}
+                                            style={{
+                                                background: '#d32f2f',
+                                                padding: '4px 10px',
+                                                fontSize: '0.7em',
+                                                width: 'auto',
+                                                marginTop: 0
+                                            }}
+                                        >
+                                            ❌
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 )}
 
                 {isHost && (
                     <div style={{ marginTop: 20, borderTop: '1px solid #444', paddingTop: 10 }}>
-                        <label>Impostores: <b>{roomData.config.impostorCount || 1}</b></label>
-                        <input
-                            type="range"
-                            min="1"
-                            max={Math.max(1, Math.floor(players.length / 2))}
-                            value={roomData.config.impostorCount || 1}
-                            onChange={e => updateDoc(doc(db, "salas", roomCode), { "config.impostorCount": parseInt(e.target.value) })}
-                            style={{ width: '100%' }}
-                        />
+                        <h3>⚙️ Configuración</h3>
+
+                        <div style={{ marginBottom: 15 }}>
+                            <label>Impostores: <b>{roomData.config.impostorCount || 1}</b></label>
+                            <input
+                                type="range"
+                                min="1"
+                                max={Math.max(1, Math.floor(players.length / 2))}
+                                value={roomData.config.impostorCount || 1}
+                                onChange={e => updateDoc(doc(db, "salas", roomCode), { "config.impostorCount": parseInt(e.target.value) })}
+                                style={{ width: '100%' }}
+                            />
+                        </div>
+
+                        <div style={{ marginBottom: 15, textAlign: 'left' }}>
+                            <label>🤖 Tema para la IA (Opcional):</label>
+                            <input
+                                placeholder="Ej: Anime, Fútbol, Star Wars..."
+                                value={customPrompt}
+                                onChange={e => setCustomPrompt(e.target.value)}
+                                style={{ marginTop: 5 }}
+                            />
+                            {!geminiKey && (
+                                <small style={{ color: '#f44', display: 'block', marginTop: 5 }}>
+                                    ⚠️ Necesitas guardar tu API Key arriba para usar IA
+                                </small>
+                            )}
+                            {geminiKey && (
+                                <small style={{ color: '#4f4', display: 'block', marginTop: 5 }}>
+                                    ✅ IA activada - Si dejas vacío, usa "Cultura General"
+                                </small>
+                            )}
+                        </div>
+
                         <button onClick={iniciarPartida} style={{ marginTop: 20, background: '#28a745', fontSize: '1.2em' }}>COMENZAR</button>
                     </div>
                 )}
@@ -446,14 +521,12 @@ function App() {
         );
     }
 
-    // GAME PLAY
-    // DEVICE MODE: Pass & Play Logic
+    // GAME PLAY - DEVICE MODE
     if (roomData.mode === 'DEVICE') {
         const player = players[currentTurnIndex];
-        const amImpostor = roomData.impostores.includes(player.uid);
+        const amImpostor = roomData.impostores.includes(player?.uid);
         const wordInfo = roomData.gameData;
 
-        // VOTING PHASE (OFFLINE)
         if (roomData.estado === "VOTACION") {
             return (
                 <div className="card">
@@ -467,14 +540,9 @@ function App() {
                                 disabled={p.estado === 'muerto'}
                                 onClick={() => {
                                     if (confirm(`¿Eliminar a ${p.nombre}?`)) {
-                                        // Logic to kill
-                                        // Just show result immediately?
-                                        // Reuse 'procesarVotacion' logic logic basically
-                                        // Manually trigger endpoint or update doc
                                         const isImp = roomData.impostores.includes(p.uid);
                                         const newP = players.map(pl => pl.uid === p.uid ? { ...pl, estado: 'muerto' } : pl);
 
-                                        // Check win
                                         const vivos = newP.filter(pl => pl.estado === 'vivo');
                                         const impsVivos = vivos.filter(pl => roomData.impostores.includes(pl.uid));
                                         const tripVivos = vivos.filter(pl => !roomData.impostores.includes(pl.uid));
@@ -505,7 +573,6 @@ function App() {
             );
         }
 
-        // RESULT PHASE
         if (roomData.estado === "RESULTADO_RONDA" || roomData.estado === "VICTORIA") {
             const res = roomData.lastResult;
             return (
@@ -533,15 +600,10 @@ function App() {
             )
         }
 
-        // ROLE REVEAL LOOP
         return (
             <div className="pass-phone-screen">
                 <Header />
-                {player.estado === 'muerto' ? (
-                    // Skip dead players?
-                    // Logic handled by Host probably manually or next/prev buttons
-                    // Simple: Only Alive players see roles?
-                    // For MVP, just show everyone.
+                {player?.estado === 'muerto' ? (
                     <p>Jugador eliminado.</p>
                 ) : (
                     <>
@@ -549,7 +611,7 @@ function App() {
                             <div onClick={() => setShowRole(true)} style={{ cursor: 'pointer', textAlign: 'center' }}>
                                 <h1 style={{ fontSize: '4em' }}>📱</h1>
                                 <h2>Pásale el cel a:</h2>
-                                <h1 style={{ color: '#03a9f4' }}>{player.nombre}</h1>
+                                <h1 style={{ color: '#03a9f4' }}>{player?.nombre}</h1>
                                 <p>(Toca para ver)</p>
                             </div>
                         ) : (
@@ -582,7 +644,6 @@ function App() {
                 )}
 
                 <div style={{ position: 'fixed', bottom: 10 }}>
-                    {/* Host Controls */}
                     <button onClick={() => updateDoc(doc(db, "salas", roomCode), { estado: "VOTACION" })} style={{ background: '#ff9800', width: 'auto', fontSize: '0.8em' }}>
                         Iniciar Votación
                     </button>
@@ -591,7 +652,6 @@ function App() {
         );
     }
 
-    // NEW: "Everyone has seen their role" view for Device Mode
     if (roomData.mode === 'DEVICE' && currentTurnIndex === -1) {
         return (
             <div className="card">
@@ -607,15 +667,12 @@ function App() {
         );
     }
 
-    // ONLINE MODE (Classic)
+    // --- ONLINE MODE ---
+    const isDead = roomData.jugadores?.find(j => j.uid === localUser?.uid)?.estado === 'muerto';
+    const amImpostor = roomData.impostores.includes(localUser?.uid);
+    const me = roomData.jugadores?.find(j => j.uid === localUser?.uid);
 
-    // --- RENDERS FOR ONLINE MODE ---
-
-    const isDead = roomData.jugadores.find(j => j.uid === localUser.uid)?.estado === 'muerto';
-    const amImpostor = roomData.impostores.includes(localUser.uid);
-    const me = roomData.jugadores.find(j => j.uid === localUser.uid);
-
-    // GAME
+    // VISTA JUEGO ONLINE
     if (roomData.estado === "JUEGO") {
         return (
             <div className="card">
@@ -672,7 +729,7 @@ function App() {
         );
     }
 
-    // VOTING
+    // VOTING ONLINE
     if (roomData.estado === "VOTACION") {
         const votesReceived = {};
         roomData.jugadores.forEach(j => {
